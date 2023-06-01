@@ -5,6 +5,7 @@ import selectors
 import signal
 import logging
 import argparse
+import time
 
 # configure logger output format
 logging.basicConfig(level=logging.DEBUG,format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s',datefmt='%m-%d %H:%M:%S')
@@ -60,45 +61,56 @@ class RoundRobin:
 class LeastConnections:
     def __init__(self, servers):
         self.servers = servers
-        self.connections = {} # {server: [connections]}
-        for server in servers:
-            self.connections[server] = 0
-        
+        self.connections = {server: 0 for server in servers}
 
     def select_server(self):
-        min = float('inf')
-        print("connections: ", str(self.connections))
+        send = self.servers[0]
         for server in self.servers:
-            if self.connections[server] < min:
-                min = self.connections[server]
-                min_server = server
+            if server not in self.connections:
+                self.connections[server] = 0
+                return server
+            elif self.connections[server] < self.connections[send]:
+                send = server
         
-        return min_server
-        
-    def update(self, server, connections=1):
-        print("server: ", str(server))
-        print("connections: ", str(connections))
-        self.connections[server] += connections
+        self.connections[send] += 1
+        return send
+    
+    def update(self, server):
+        self.connections[server] -= 1
+
         
 
 # least response time
 class LeastResponseTime:
     def __init__(self, servers):
         self.servers = servers
-        self.resp_times = [0 for server in servers]
-        self.start_times = [0 for server in servers] # alterar para lista com listas
-        self.num_connections = [0 for server in servers]
+        self.resp_times = {server: [0, 0] for server in servers}  # server -> [resp_time, num_connections]
+        self.start_times = {server: [] for server in servers}
+        self.num_connections = 0
 
     def select_server(self):
-        pass
+        if self.resp_times[self.servers[0]][0] == 0:
+            selected_server = self.servers[self.num_connections]
+            self.resp_times[selected_server][1] += 1
+            self.num_connections = (self.num_connections + 1) % len(self.servers)
+        else:
+            selected_server = self.servers[0]
+            for server in self.servers:
+                if self.resp_times[server][0] < self.resp_times[selected_server][0]:
+                    selected_server = server
+                elif self.resp_times[server][0] == 0 and self.resp_times[server][1] < self.resp_times[selected_server][1]:
+                    selected_server = server
 
-    def update(self, *arg):
-        # no request: add ao resp_times valor pequeno, ao start_times o tempo atual e 
-        # ao num_connections +1 ao numero q está lá
-        # no response: add ao resp_times a media
-        # resp_times[server_idx] * (num_connections[serv_idx]-1) + (time.time() - start_times[server_idx]) / num_connections[server_idx]
-        pass
+        self.start_times[selected_server].append(time.time())
+        self.resp_times[selected_server][1] += 1
+        return selected_server
 
+    def update(self, server):
+        if self.start_times[server]:
+            end_time = time.time()
+            duration = end_time - self.start_times[server].pop(0)
+            resp_times = self.resp_times[server][0] * (self.resp_times[server][1] - 1) + duration / self.resp_times[server][1]
+            self.resp_times[server][0] = resp_times
 
 POLICIES = {
     "N2One": N2One,
@@ -121,21 +133,12 @@ class SocketMapper:
         sel.register(upstream_sock, selectors.EVENT_READ, read)
         logger.debug("Proxying to %s %s", *upstream_server)
         self.map[client_sock] =  upstream_sock
-        if type(self.policy) == LeastConnections:
-            self.policy.update(upstream_server,2)
 
     def delete(self, sock):
-        if type(self.policy) == LeastConnections:
-            self.policy.update(self.get_upstream_sock(sock),-1)
-        paired_sock = self.get_sock(sock)
         sel.unregister(sock)
         sock.close()
-        sel.unregister(paired_sock)
-        paired_sock.close()
         if sock in self.map:
             self.map.pop(sock)
-        else:
-            self.map.pop(paired_sock)
 
     def get_sock(self, sock):
         for client, upstream in self.map.items():
